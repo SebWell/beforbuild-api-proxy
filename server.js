@@ -6,6 +6,9 @@ const SUPABASE_URL = process.env.SUPABASE_URL || ''
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || ''
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',')
+const N8N_INTERNAL_URL = process.env.N8N_INTERNAL_URL || ''
+const N8N_API_KEY = process.env.N8N_API_KEY || ''
+const ADMIN_SECRET = process.env.ADMIN_SECRET || ''
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error('Missing required env vars: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY')
@@ -192,6 +195,40 @@ async function handleData(req, res, origin) {
   }
 }
 
+/**
+ * POST/PUT/GET/DELETE /admin/n8n/*
+ * Proxies to n8n internal API (bypasses Cloudflare WAF)
+ * Requires ADMIN_SECRET header for auth
+ */
+async function handleN8nProxy(req, res, origin, path) {
+  // Check admin secret
+  const secret = req.headers['x-admin-secret']
+  if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
+    return jsonResponse(res, 403, { error: 'Forbidden' }, origin)
+  }
+
+  const n8nPath = path.replace('/admin/n8n', '')
+  const raw = req.method !== 'GET' ? await readBody(req) : null
+
+  try {
+    const upstream = await fetch(`${N8N_INTERNAL_URL}${n8nPath}`, {
+      method: req.method,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-N8N-API-KEY': N8N_API_KEY,
+      },
+      body: raw || undefined,
+    })
+
+    const text = await upstream.text()
+    let data
+    try { data = JSON.parse(text) } catch { data = text }
+    return jsonResponse(res, upstream.status, data, origin)
+  } catch (err) {
+    return jsonResponse(res, 502, { error: 'n8n unavailable', details: err.message }, origin)
+  }
+}
+
 // --- Server ---
 const server = createServer(async (req, res) => {
   const origin = req.headers.origin || ''
@@ -222,7 +259,17 @@ const server = createServer(async (req, res) => {
     return jsonResponse(res, 404, { error: `Unknown endpoint: ${path}` }, origin)
   }
 
-  // Only POST for all other routes
+  // Admin routes (any method)
+  if (path.startsWith('/admin/n8n/') && N8N_INTERNAL_URL && N8N_API_KEY) {
+    try {
+      return await handleN8nProxy(req, res, origin, path)
+    } catch (err) {
+      console.error('[Admin Proxy Error]', err)
+      return jsonResponse(res, 500, { error: 'Internal server error' }, origin)
+    }
+  }
+
+  // Only POST for public routes
   if (req.method !== 'POST') {
     return jsonResponse(res, 405, { error: 'Method not allowed. Use POST.' }, origin)
   }
