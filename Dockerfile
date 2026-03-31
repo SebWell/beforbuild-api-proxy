@@ -1,5 +1,5 @@
-FROM node:22-alpine
-RUN apk add --no-cache curl
+FROM node:22-slim
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json server.js ./
 EXPOSE 3000
